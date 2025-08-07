@@ -1462,10 +1462,6 @@ pub fn concat(comptime T: type, dest: []T, src: []const []const T) void {
     }
 }
 
-pub const fast_debug_build_cmd = .None;
-pub const fast_debug_build_mode = fast_debug_build_cmd != .None and
-    Environment.isDebug;
-
 pub const renamer = @import("./renamer.zig");
 // TODO: Rename to SourceMap as this is a struct.
 pub const sourcemap = @import("./sourcemap/sourcemap.zig");
@@ -1481,10 +1477,8 @@ pub fn asByteSlice(buffer: anytype) []const u8 {
 }
 
 comptime {
-    if (fast_debug_build_cmd != .RunCommand and fast_debug_build_mode) {
-        _ = @import("./bun.js/node/buffer.zig").BufferVectorized.fill;
-        _ = @import("./cli/upgrade_command.zig").Version;
-    }
+    _ = @import("./bun.js/node/buffer.zig").BufferVectorized.fill;
+    _ = @import("./cli/upgrade_command.zig").Version;
 }
 
 pub fn DebugOnlyDisabler(comptime Type: type) type {
@@ -3533,6 +3527,10 @@ pub fn GenericIndex(backing_int: type, uid: anytype) type {
             pub inline fn unwrap(oi: Optional) ?Index {
                 return if (oi == .none) null else @enumFromInt(@intFromEnum(oi));
             }
+
+            pub inline fn unwrapGet(oi: Optional) ?backing_int {
+                return if (oi == .none) null else @intFromEnum(oi);
+            }
         };
     };
 }
@@ -3755,6 +3753,8 @@ pub const mach_port = if (Environment.isMac) std.c.mach_port_t else u32;
 
 pub const cpp = @import("cpp").bindings;
 
+pub const asan = @import("./asan.zig");
+
 pub fn contains(item: anytype, list: *const std.ArrayListUnmanaged(@TypeOf(item))) bool {
     const T = @TypeOf(item);
     return switch (T) {
@@ -3762,6 +3762,8 @@ pub fn contains(item: anytype, list: *const std.ArrayListUnmanaged(@TypeOf(item)
         else => std.mem.indexOfScalar(T, list.items, item) != null,
     };
 }
+
+pub const safety = @import("./safety.zig");
 
 const CopyFile = @import("./copy_file.zig");
 const builtin = @import("builtin");
