@@ -245,12 +245,12 @@ pub const YarnLock = struct {
         }
     };
 
-    entries: std.ArrayList(Entry),
+    entries: std.array_list.Managed(Entry),
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) YarnLock {
         return .{
-            .entries = std.ArrayList(Entry).init(allocator),
+            .entries = std.array_list.Managed(Entry).init(allocator),
             .allocator = allocator,
         };
     }
@@ -265,7 +265,7 @@ pub const YarnLock = struct {
     pub fn parse(self: *YarnLock, content: []const u8) !void {
         var lines = strings.split(content, "\n");
         var current_entry: ?Entry = null;
-        var current_specs = std.ArrayList([]const u8).init(self.allocator);
+        var current_specs = std.array_list.Managed([]const u8).init(self.allocator);
         defer current_specs.deinit();
 
         var current_deps: ?bun.StringHashMap(string) = null;
@@ -401,7 +401,7 @@ pub const YarnLock = struct {
                     } else if (strings.eqlComptime(key, "integrity")) {
                         current_entry.?.integrity = value;
                     } else if (strings.eqlComptime(key, "os")) {
-                        var os_list = std.ArrayList([]const u8).init(self.allocator);
+                        var os_list = std.array_list.Managed([]const u8).init(self.allocator);
                         var os_it = strings.split(value[1 .. value.len - 1], ",");
                         while (os_it.next()) |os| {
                             const trimmed_os = strings.trim(os, " \"");
@@ -409,7 +409,7 @@ pub const YarnLock = struct {
                         }
                         current_entry.?.os = try os_list.toOwnedSlice();
                     } else if (strings.eqlComptime(key, "cpu")) {
-                        var cpu_list = std.ArrayList([]const u8).init(self.allocator);
+                        var cpu_list = std.array_list.Managed([]const u8).init(self.allocator);
                         var cpu_it = strings.split(value[1 .. value.len - 1], ",");
                         while (cpu_it.next()) |cpu| {
                             const trimmed_cpu = strings.trim(cpu, " \"");
@@ -475,81 +475,79 @@ const DependencyType = enum {
     optional,
     peer,
 };
-const processDeps = struct {
-    fn process(
-        deps: bun.StringHashMap(string),
-        dep_type: DependencyType,
-        yarn_lock_: *YarnLock,
-        string_buf_: *Semver.String.Buf,
-        deps_buf: []Dependency,
-        res_buf: []Install.PackageID,
-        log: *logger.Log,
-        manager: *Install.PackageManager,
-        yarn_entry_to_package_id: []const Install.PackageID,
-    ) ![]Install.PackageID {
-        var deps_it = deps.iterator();
-        var count: usize = 0;
-        var dep_spec_name_stack = std.heap.stackFallback(1024, bun.default_allocator);
-        const temp_allocator = dep_spec_name_stack.get();
+fn processDeps(
+    deps: bun.StringHashMap(string),
+    dep_type: DependencyType,
+    yarn_lock_: *YarnLock,
+    string_buf_: *Semver.String.Buf,
+    deps_buf: []Dependency,
+    res_buf: []Install.PackageID,
+    log: *logger.Log,
+    manager: *Install.PackageManager,
+    yarn_entry_to_package_id: []const Install.PackageID,
+) ![]Install.PackageID {
+    var deps_it = deps.iterator();
+    var count: usize = 0;
+    var dep_spec_name_stack = std.heap.stackFallback(1024, bun.default_allocator);
+    const temp_allocator = dep_spec_name_stack.get();
 
-        while (deps_it.next()) |dep| {
-            const dep_name = dep.key_ptr.*;
-            const dep_version = dep.value_ptr.*;
-            const dep_spec = try std.fmt.allocPrint(
-                temp_allocator,
-                "{s}@{s}",
-                .{ dep_name, dep_version },
-            );
-            defer temp_allocator.free(dep_spec);
+    while (deps_it.next()) |dep| {
+        const dep_name = dep.key_ptr.*;
+        const dep_version = dep.value_ptr.*;
+        const dep_spec = try std.fmt.allocPrint(
+            temp_allocator,
+            "{s}@{s}",
+            .{ dep_name, dep_version },
+        );
+        defer temp_allocator.free(dep_spec);
 
-            if (yarn_lock_.findEntryBySpec(dep_spec)) |dep_entry| {
-                const dep_name_hash = stringHash(dep_name);
-                const dep_name_str = try string_buf_.appendWithHash(dep_name, dep_name_hash);
+        if (yarn_lock_.findEntryBySpec(dep_spec)) |dep_entry| {
+            const dep_name_hash = stringHash(dep_name);
+            const dep_name_str = try string_buf_.appendWithHash(dep_name, dep_name_hash);
 
-                const parsed_version = if (YarnLock.Entry.isNpmAlias(dep_version)) blk: {
-                    const alias_info = YarnLock.Entry.parseNpmAlias(dep_version);
-                    break :blk alias_info.version;
-                } else dep_version;
+            const parsed_version = if (YarnLock.Entry.isNpmAlias(dep_version)) blk: {
+                const alias_info = YarnLock.Entry.parseNpmAlias(dep_version);
+                break :blk alias_info.version;
+            } else dep_version;
 
-                deps_buf[count] = Dependency{
-                    .name = dep_name_str,
-                    .name_hash = dep_name_hash,
-                    .version = Dependency.parse(
-                        yarn_lock_.allocator,
-                        dep_name_str,
-                        dep_name_hash,
-                        parsed_version,
-                        &Semver.SlicedString.init(parsed_version, parsed_version),
-                        log,
-                        manager,
-                    ) orelse Dependency.Version{},
-                    .behavior = .{
-                        .prod = dep_type == .production,
-                        .optional = dep_type == .optional,
-                        .dev = dep_type == .development,
-                        .peer = dep_type == .peer,
-                        .workspace = dep_entry.workspace,
-                    },
-                };
-                var found_package_id: ?Install.PackageID = null;
-                outer: for (yarn_lock_.entries.items, 0..) |entry_, yarn_idx| {
-                    for (entry_.specs) |entry_spec| {
-                        if (strings.eql(entry_spec, dep_spec)) {
-                            found_package_id = yarn_entry_to_package_id[yarn_idx];
-                            break :outer;
-                        }
+            deps_buf[count] = Dependency{
+                .name = dep_name_str,
+                .name_hash = dep_name_hash,
+                .version = Dependency.parse(
+                    yarn_lock_.allocator,
+                    dep_name_str,
+                    dep_name_hash,
+                    parsed_version,
+                    &Semver.SlicedString.init(parsed_version, parsed_version),
+                    log,
+                    manager,
+                ) orelse Dependency.Version{},
+                .behavior = .{
+                    .prod = dep_type == .production,
+                    .optional = dep_type == .optional,
+                    .dev = dep_type == .development,
+                    .peer = dep_type == .peer,
+                    .workspace = dep_entry.workspace,
+                },
+            };
+            var found_package_id: ?Install.PackageID = null;
+            outer: for (yarn_lock_.entries.items, 0..) |entry_, yarn_idx| {
+                for (entry_.specs) |entry_spec| {
+                    if (strings.eql(entry_spec, dep_spec)) {
+                        found_package_id = yarn_entry_to_package_id[yarn_idx];
+                        break :outer;
                     }
                 }
+            }
 
-                if (found_package_id) |pkg_id| {
-                    res_buf[count] = pkg_id;
-                    count += 1;
-                }
+            if (found_package_id) |pkg_id| {
+                res_buf[count] = pkg_id;
+                count += 1;
             }
         }
-        return res_buf[0..count];
     }
-}.process;
+    return res_buf[0..count];
+}
 
 pub fn migrateYarnLockfile(
     this: *Lockfile,
@@ -571,6 +569,7 @@ pub fn migrateYarnLockfile(
 
     this.initEmpty(allocator);
     Install.initializeStore();
+    bun.analytics.Features.yarn_migration += 1;
 
     var string_buf = this.stringBuf();
 
@@ -578,7 +577,7 @@ pub fn migrateYarnLockfile(
     var root_dep_count: u32 = 0;
     var root_dep_count_from_package_json: u32 = 0;
 
-    var root_dependencies = std.ArrayList(struct { name: []const u8, version: []const u8, dep_type: DependencyType }).init(allocator);
+    var root_dependencies = std.array_list.Managed(struct { name: []const u8, version: []const u8, dep_type: DependencyType }).init(allocator);
     defer {
         for (root_dependencies.items) |dep| {
             allocator.free(dep.name);
@@ -735,7 +734,7 @@ pub fn migrateYarnLockfile(
     var package_versions = bun.StringHashMap(VersionInfo).init(allocator);
     defer package_versions.deinit();
 
-    var scoped_packages = bun.StringHashMap(std.ArrayList(VersionInfo)).init(allocator);
+    var scoped_packages = bun.StringHashMap(std.array_list.Managed(VersionInfo)).init(allocator);
     defer {
         var it = scoped_packages.iterator();
         while (it.next()) |entry| {
@@ -771,7 +770,7 @@ pub fn migrateYarnLockfile(
 
         if (package_versions.get(name)) |existing| {
             if (!strings.eql(existing.version, version)) {
-                var list = scoped_packages.get(name) orelse std.ArrayList(VersionInfo).init(allocator);
+                var list = scoped_packages.get(name) orelse std.array_list.Managed(VersionInfo).init(allocator);
 
                 var found_existing = false;
                 var found_new = false;
@@ -956,9 +955,8 @@ pub fn migrateYarnLockfile(
                         });
                     }
 
-                    const version = entry.version;
-                    const sliced_version = Semver.SlicedString.init(version, version);
-                    const result = Semver.Version.parse(sliced_version);
+                    const version = try string_buf.append(entry.version);
+                    const result = Semver.Version.parse(version.sliced(this.buffers.string_bytes.items));
                     if (!result.valid) {
                         break :blk Resolution{};
                     }
@@ -1033,6 +1031,7 @@ pub fn migrateYarnLockfile(
             if (found_idx) |idx| {
                 const name_hash = stringHash(dep.name);
                 const dep_name_string = try string_buf.appendWithHash(dep.name, name_hash);
+                const version_string = try string_buf.append(dep.version);
 
                 dependencies_buf[actual_root_dep_count] = Dependency{
                     .name = dep_name_string,
@@ -1041,8 +1040,8 @@ pub fn migrateYarnLockfile(
                         allocator,
                         dep_name_string,
                         name_hash,
-                        dep.version,
-                        &Semver.SlicedString.init(dep.version, dep.version),
+                        version_string.slice(this.buffers.string_bytes.items),
+                        &version_string.sliced(this.buffers.string_bytes.items),
                         log,
                         manager,
                     ) orelse Dependency.Version{},
@@ -1130,7 +1129,7 @@ pub fn migrateYarnLockfile(
         },
     });
 
-    var package_dependents = try allocator.alloc(std.ArrayList(Install.PackageID), next_package_id);
+    var package_dependents = try allocator.alloc(std.array_list.Managed(Install.PackageID), next_package_id);
     defer {
         for (package_dependents) |*list| {
             list.deinit();
@@ -1138,7 +1137,7 @@ pub fn migrateYarnLockfile(
         allocator.free(package_dependents);
     }
     for (package_dependents) |*list| {
-        list.* = std.ArrayList(Install.PackageID).init(allocator);
+        list.* = std.array_list.Managed(Install.PackageID).init(allocator);
     }
 
     for (yarn_lock.entries.items, 0..) |entry, yarn_idx| {
@@ -1369,7 +1368,7 @@ pub fn migrateYarnLockfile(
             const version_str = switch (this.packages.get(package_id).resolution.tag) {
                 .npm => brk: {
                     var version_buf: [64]u8 = undefined;
-                    const formatted = std.fmt.bufPrint(&version_buf, "{}", .{this.packages.get(package_id).resolution.value.npm.version.fmt(this.buffers.string_bytes.items)}) catch "";
+                    const formatted = std.fmt.bufPrint(&version_buf, "{f}", .{this.packages.get(package_id).resolution.value.npm.version.fmt(this.buffers.string_bytes.items)}) catch "";
                     break :brk formatted;
                 },
                 else => "unknown",
@@ -1672,6 +1671,8 @@ pub fn migrateYarnLockfile(
 
     try this.resolve(log);
 
+    try this.fetchNecessaryPackageMetadataAfterYarnOrPnpmMigration(manager, true);
+
     if (Environment.allow_assert) {
         try this.verifyData();
     }
@@ -1680,7 +1681,7 @@ pub fn migrateYarnLockfile(
 
     const result = LoadResult{ .ok = .{
         .lockfile = this,
-        .was_migrated = true,
+        .migrated = .yarn,
         .loaded_from_binary_lockfile = false,
         .serializer_result = .{},
         .format = .binary,

@@ -34,7 +34,7 @@ fn removeTrailingNewline(text: []const u8) []const u8 {
     return text[0 .. text.len - 1];
 }
 
-pub fn printDiffMain(arena: std.mem.Allocator, not: bool, received_slice: []const u8, expected_slice: []const u8, writer: anytype, config: DiffConfig) !void {
+pub fn printDiffMain(arena: std.mem.Allocator, not: bool, received_slice: []const u8, expected_slice: []const u8, writer: anytype, config: DiffConfig) std.Io.Writer.Error!void {
     if (not) {
         switch (config.enable_ansi_colors) {
             true => try writer.print("Expected: not " ++ colors.red ++ "{s}" ++ colors.reset, .{expected_slice}),
@@ -55,35 +55,35 @@ pub fn printDiffMain(arena: std.mem.Allocator, not: bool, received_slice: []cons
 
     var dmp = DMPUsize.default;
     dmp.config.diff_timeout = 200;
-    const linesToChars = try DMP.diffLinesToChars(arena, expected_slice, received_slice);
-    const charDiffs = try dmp.diff(arena, linesToChars.chars_1, linesToChars.chars_2, false);
-    const diffs = try DMP.diffCharsToLines(arena, &charDiffs, linesToChars.line_array.items);
+    const linesToChars = bun.handleOom(DMP.diffLinesToChars(arena, expected_slice, received_slice));
+    const charDiffs = bun.handleOom(dmp.diff(arena, linesToChars.chars_1, linesToChars.chars_2, false));
+    const diffs = bun.handleOom(DMP.diffCharsToLines(arena, &charDiffs, linesToChars.line_array.items));
 
-    var diff_segments = std.ArrayList(DiffSegment).init(arena);
+    var diff_segments = std.array_list.Managed(DiffSegment).init(arena);
     for (diffs.items) |diff| {
         if (diff.operation == .delete) {
-            try diff_segments.append(DiffSegment{
+            bun.handleOom(diff_segments.append(DiffSegment{
                 .removed = diff.text,
                 .inserted = "",
                 .mode = .removed,
-            });
+            }));
         } else if (diff.operation == .insert) {
             if (diff_segments.items.len > 0 and diff_segments.items[diff_segments.items.len - 1].mode == .removed) {
                 diff_segments.items[diff_segments.items.len - 1].inserted = diff.text;
                 diff_segments.items[diff_segments.items.len - 1].mode = .modified;
             } else {
-                try diff_segments.append(DiffSegment{
+                bun.handleOom(diff_segments.append(DiffSegment{
                     .removed = "",
                     .inserted = diff.text,
                     .mode = .inserted,
-                });
+                }));
             }
         } else if (diff.operation == .equal) {
-            try diff_segments.append(DiffSegment{
+            bun.handleOom(diff_segments.append(DiffSegment{
                 .removed = diff.text,
                 .inserted = diff.text,
                 .mode = .equal,
-            });
+            }));
         }
     }
 
@@ -96,21 +96,21 @@ pub fn printDiffMain(arena: std.mem.Allocator, not: bool, received_slice: []cons
     // Determine if the diff needs to be chunked
     if (expected_slice.len > config.min_bytes_before_chunking or received_slice.len > config.min_bytes_before_chunking) {
         // Split 'equal' segments into lines
-        var new_diff_segments = std.ArrayList(DiffSegment).init(arena);
+        var new_diff_segments = std.array_list.Managed(DiffSegment).init(arena);
 
         for (diff_segments.items) |diff_segment| {
             if (diff_segment.mode == .equal) {
                 var split = std.mem.splitScalar(u8, diff_segment.removed, '\n');
                 while (split.next()) |line| {
-                    try new_diff_segments.append(DiffSegment{
+                    bun.handleOom(new_diff_segments.append(DiffSegment{
                         .removed = line,
                         .inserted = line,
                         .mode = .equal,
                         .skip = true,
-                    });
+                    }));
                 }
             } else {
-                try new_diff_segments.append(diff_segment);
+                bun.handleOom(new_diff_segments.append(diff_segment));
             }
         }
 
@@ -234,10 +234,10 @@ const base_styles = struct {
 
 const styles = switch (mode) {
     .bg_always => struct {
-        const inserted_line = base_styles.red_bg_inserted;
-        const removed_line = base_styles.green_bg_removed;
-        const inserted_diff = base_styles.red_bg_inserted;
-        const removed_diff = base_styles.green_bg_removed;
+        const inserted_line = base_styles.red_fg_inserted;
+        const removed_line = base_styles.green_fg_removed;
+        const inserted_diff = base_styles.red_fg_inserted;
+        const removed_diff = base_styles.green_fg_removed;
         const equal = base_styles.dim_equal;
         const inserted_equal = base_styles.red_fg_inserted;
         const removed_equal = base_styles.green_fg_removed;
@@ -245,8 +245,8 @@ const styles = switch (mode) {
     .bg_diff_only => struct {
         const inserted_line = base_styles.red_fg_inserted;
         const removed_line = base_styles.green_fg_removed;
-        const inserted_diff = base_styles.red_bg_inserted;
-        const removed_diff = base_styles.green_bg_removed;
+        const inserted_diff = base_styles.red_fg_inserted;
+        const removed_diff = base_styles.green_fg_removed;
         const equal = base_styles.dim_equal;
         const inserted_equal = base_styles.red_fg_inserted;
         const removed_equal = base_styles.green_fg_removed;
@@ -384,6 +384,17 @@ fn printModifiedSegmentWithoutDiffdiff(
     if (!modified_style.single_line) try writer.writeAll("\n");
 }
 
+fn shouldHighlightChar(char: u8) bool {
+    // Highlight whitespace and control characters:
+    // - Control characters (< 0x20)
+    // - Space (0x20)
+    // - Tab is included in control chars (0x09)
+    // - Delete character (0x7F)
+    if (char <= 0x20) return true; // includes space and all control chars
+    if (char == 0x7F) return true; // DEL character
+    return false;
+}
+
 const ModifiedStyle = struct {
     single_line: bool,
 };
@@ -393,7 +404,7 @@ fn printModifiedSegment(
     writer: anytype,
     config: DiffConfig,
     modified_style: ModifiedStyle,
-) !void {
+) std.Io.Writer.Error!void {
     const removed_prefix = switch (modified_style.single_line) {
         true => prefix_styles.single_line_removed,
         false => prefix_styles.removed,
@@ -407,8 +418,8 @@ fn printModifiedSegment(
         return printModifiedSegmentWithoutDiffdiff(writer, config, segment, modified_style);
     }
 
-    var char_diff = try DMP.default.diff(arena, segment.removed, segment.inserted, true);
-    try DMP.diffCleanupSemantic(arena, &char_diff);
+    var char_diff = bun.handleOom(DMP.default.diff(arena, segment.removed, segment.inserted, true));
+    bun.handleOom(DMP.diffCleanupSemantic(arena, &char_diff));
 
     var deleted_highlighted_length: usize = 0;
     var inserted_highlighted_length: usize = 0;
@@ -438,9 +449,26 @@ fn printModifiedSegment(
     }
 
     try printLinePrefix(writer, config, removed_prefix);
-    for (char_diff.items) |item| {
+
+    for (char_diff.items) |*item| {
         switch (item.operation) {
-            .delete => try printSegment(item.text, writer, config, styles.removed_diff),
+            .delete => {
+                const only_highlightable = brk: {
+                    for (item.text) |char| {
+                        if (!shouldHighlightChar(char)) {
+                            break :brk false;
+                        }
+                    }
+                    break :brk true;
+                };
+
+                if (only_highlightable) {
+                    // Use background color for whitespace/control character differences
+                    try printSegment(item.text, writer, config, base_styles.green_bg_removed);
+                } else {
+                    try printSegment(item.text, writer, config, styles.removed_diff);
+                }
+            },
             .insert => {},
             .equal => try printSegment(item.text, writer, config, styles.removed_equal),
         }
@@ -448,10 +476,26 @@ fn printModifiedSegment(
     try writer.writeAll("\n");
 
     try printLinePrefix(writer, config, inserted_prefix);
-    for (char_diff.items) |item| {
+    for (char_diff.items) |*item| {
         switch (item.operation) {
             .delete => {},
-            .insert => try printSegment(item.text, writer, config, styles.inserted_diff),
+            .insert => {
+                const only_highlightable = brk: {
+                    for (item.text) |char| {
+                        if (!shouldHighlightChar(char)) {
+                            break :brk false;
+                        }
+                    }
+                    break :brk true;
+                };
+
+                if (only_highlightable) {
+                    // Use background color for whitespace/control character differences
+                    try printSegment(item.text, writer, config, base_styles.red_bg_inserted);
+                } else {
+                    try printSegment(item.text, writer, config, styles.inserted_diff);
+                }
+            },
             .equal => try printSegment(item.text, writer, config, styles.inserted_equal),
         }
     }
@@ -471,7 +515,7 @@ pub fn printDiff(
     writer: anytype,
     diff_segments: []const DiffSegment,
     config: DiffConfig,
-) !void {
+) std.Io.Writer.Error!void {
     var removed_line_number: usize = 1;
     var inserted_line_number: usize = 1;
     var removed_diff_lines: usize = 0;

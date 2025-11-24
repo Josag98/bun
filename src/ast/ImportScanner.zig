@@ -217,7 +217,7 @@ pub fn scan(
                             result.* = alias;
                         }
                         strings.sortDesc(sorted);
-                        p.named_imports.ensureUnusedCapacity(p.allocator, sorted.len) catch bun.outOfMemory();
+                        bun.handleOom(p.named_imports.ensureUnusedCapacity(p.allocator, sorted.len));
 
                         // Create named imports for these property accesses. This will
                         // cause missing imports to generate useful warnings.
@@ -236,7 +236,7 @@ pub fn scan(
                                     .namespace_ref = namespace_ref,
                                     .import_record_index = st.import_record_index,
                                 },
-                            ) catch bun.outOfMemory();
+                            ) catch |err| bun.handleOom(err);
 
                             const name: LocRef = item;
                             const name_ref = name.ref.?;
@@ -262,7 +262,7 @@ pub fn scan(
                     p.named_imports.ensureUnusedCapacity(
                         p.allocator,
                         st.items.len + @as(usize, @intFromBool(st.default_name != null)) + @as(usize, @intFromBool(st.star_name_loc != null)),
-                    ) catch bun.outOfMemory();
+                    ) catch |err| bun.handleOom(err);
 
                     if (st.star_name_loc) |loc| {
                         record.contains_import_star = true;
@@ -466,7 +466,7 @@ pub fn scan(
                 try p.import_records_for_current_part.append(allocator, st.import_record_index);
                 p.named_imports.ensureUnusedCapacity(p.allocator, st.items.len) catch unreachable;
                 for (st.items) |item| {
-                    const ref = item.name.ref orelse p.panic("Expected export from item to have a name {any}", .{st});
+                    const ref = item.name.ref orelse p.panic("Expected export from item to have a name", .{});
                     // Note that the imported alias is not item.Alias, which is the
                     // exported alias. This is somewhat confusing because each
                     // SExportFrom statement is basically SImport + SExportClause in one.

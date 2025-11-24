@@ -34,7 +34,7 @@ export function getStdioWriteStream(
   process: typeof globalThis.process,
   fd: number,
   isTTY: boolean,
-  _fdType: BunProcessStdinFdType,
+  fdType: BunProcessStdinFdType,
 ) {
   $assert(fd === 1 || fd === 2, `Expected fd to be 1 or 2, got ${fd}`);
 
@@ -55,6 +55,17 @@ export function getStdioWriteStream(
     stream = new fs.WriteStream(null, { autoClose: false, fd, $fastPath: true });
     stream.readable = false;
     stream._type = "fs";
+
+    // When stdout/stderr are piped or connected to a socket, they should have Symbol.asyncIterator
+    // to match Node.js behavior where they become Duplex streams (Socket)
+    // But when redirected to a file, they shouldn't have it
+    if (fdType === BunProcessStdinFdType.pipe || fdType === BunProcessStdinFdType.socket) {
+      stream[Symbol.asyncIterator] = function () {
+        return (async function* () {
+          // stdout/stderr don't produce readable data, so yield nothing
+        })();
+      };
+    }
   }
 
   if (fd === 1 || fd === 2) {
@@ -100,6 +111,8 @@ export function getStdinStream(
     $debug("ref();", reader ? "already has reader" : "getting reader");
     reader ??= native.getReader();
     source.updateRef(forceUnref ? false : true);
+    source?.setFlowing?.(true);
+
     shouldDisown = false;
     if (needsInternalReadRefresh) {
       needsInternalReadRefresh = false;
@@ -109,6 +122,7 @@ export function getStdinStream(
 
   function disown() {
     $debug("unref();");
+    source?.setFlowing?.(false);
 
     if (reader) {
       try {
@@ -172,13 +186,11 @@ export function getStdinStream(
 
   const originalPause = stream.pause;
   stream.pause = function () {
-    $debug("pause();");
     return originalPause.$call(this);
   };
 
   const originalResume = stream.resume;
   stream.resume = function () {
-    $debug("resume();");
     own();
     return originalResume.$call(this);
   };
@@ -241,10 +253,11 @@ export function getStdinStream(
 
   stream.on("pause", () => {
     process.nextTick(() => {
+      // Only disown if the stream is still paused (not resumed in the meantime)
       if (!stream.readableFlowing) {
         stream._readableState.reading = false;
+        disown();
       }
-      disown();
     });
   });
 
@@ -346,23 +359,6 @@ export function initializeNextTickQueue(
   }
 
   return nextTick;
-}
-
-$getter;
-export function mainModule() {
-  var existing = $getByIdDirectPrivate(this, "main");
-  // note: this doesn't handle "process.mainModule = undefined"
-  if (typeof existing !== "undefined") {
-    return existing;
-  }
-
-  return $requireMap.$get(Bun.main);
-}
-
-$overriddenName = "set mainModule";
-export function setMainModule(value) {
-  $putByIdDirectPrivate(this, "main", value);
-  return true;
 }
 
 type InternalEnvMap = Record<string, string>;

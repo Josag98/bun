@@ -346,6 +346,7 @@ us_internal_ssl_socket_close(struct us_internal_ssl_socket_t *s, int code,
 
   // check if we are already closed
   if (us_internal_ssl_socket_is_closed(s)) return s;
+  us_internal_set_loop_ssl_data(s);
   us_internal_update_handshake(s);
 
   if (s->handshake_state != HANDSHAKE_COMPLETED) {
@@ -634,7 +635,7 @@ ssl_on_writable(struct us_internal_ssl_socket_t *s) {
         (struct us_internal_ssl_socket_context_t *)us_socket_context(0, &s->s);
 
     // if this one fails to write data, it sets ssl_read_wants_write again
-    s = (struct us_internal_ssl_socket_t *)context->sc.on_data(&s->s, 0,
+    s = (struct us_internal_ssl_socket_t *)context->sc.on_data(&s->s, "",
                                                                0); // cast here!
   }
   // Do not call on_writable if the socket is closed.

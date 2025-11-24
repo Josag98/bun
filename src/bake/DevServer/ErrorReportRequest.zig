@@ -22,7 +22,7 @@ body: uws.BodyReaderMixin(@This(), "body", runWithBody, finalize),
 pub fn run(dev: *DevServer, _: *Request, resp: anytype) void {
     const ctx = bun.new(ErrorReportRequest, .{
         .dev = dev,
-        .body = .init(dev.allocator),
+        .body = .init(dev.allocator()),
     });
     ctx.dev.server.?.onPendingRequest();
     ctx.body.readBody(resp);
@@ -41,8 +41,8 @@ pub fn runWithBody(ctx: *ErrorReportRequest, body: []const u8, r: AnyResponse) !
     var s = std.io.fixedBufferStream(body);
     const reader = s.reader();
 
-    var sfa_general = std.heap.stackFallback(65536, ctx.dev.allocator);
-    var sfa_sourcemap = std.heap.stackFallback(65536, ctx.dev.allocator);
+    var sfa_general = std.heap.stackFallback(65536, ctx.dev.allocator());
+    var sfa_sourcemap = std.heap.stackFallback(65536, ctx.dev.allocator());
     const temp_alloc = sfa_general.get();
     var arena = std.heap.ArenaAllocator.init(temp_alloc);
     defer arena.deinit();
@@ -69,8 +69,8 @@ pub fn runWithBody(ctx: *ErrorReportRequest, body: []const u8, r: AnyResponse) !
             .function_name = .init(function_name),
             .source_url = .init(file_name),
             .position = if (line > 0) .{
-                .line = .fromOneBased(line + 1),
-                .column = .fromOneBased(@max(1, column)),
+                .line = .fromOneBased(line),
+                .column = if (column < 1) .invalid else .fromOneBased(column),
                 .line_start_byte = 0,
             } else .{
                 .line = .invalid,
@@ -78,6 +78,7 @@ pub fn runWithBody(ctx: *ErrorReportRequest, body: []const u8, r: AnyResponse) !
                 .line_start_byte = 0,
             },
             .code_type = .None,
+            .is_async = false,
             .remapped = false,
         });
     }
@@ -138,7 +139,7 @@ pub fn runWithBody(ctx: *ErrorReportRequest, body: []const u8, r: AnyResponse) !
         // So we can know if the frame is inside the HMR runtime if
         // `frame.position.line < generated_mappings[1].lines`.
         const generated_mappings = result.mappings.generated();
-        if (generated_mappings.len <= 1 or frame.position.line.zeroBased() < generated_mappings[1].lines) {
+        if (generated_mappings.len <= 1 or frame.position.line.zeroBased() < generated_mappings[1].lines.zeroBased()) {
             frame.source_url = .init(runtime_name); // matches value in source map
             frame.position = .invalid;
             continue;
@@ -146,10 +147,10 @@ pub fn runWithBody(ctx: *ErrorReportRequest, body: []const u8, r: AnyResponse) !
 
         // Remap the frame
         const remapped = result.mappings.find(
-            frame.position.line.oneBased(),
-            frame.position.column.zeroBased(),
+            frame.position.line,
+            frame.position.column,
         );
-        if (remapped) |remapped_position| {
+        if (remapped) |*remapped_position| {
             frame.position = .{
                 .line = .fromZeroBased(remapped_position.originalLine()),
                 .column = .fromZeroBased(remapped_position.originalColumn()),
@@ -159,18 +160,18 @@ pub fn runWithBody(ctx: *ErrorReportRequest, body: []const u8, r: AnyResponse) !
             if (index >= 1 and (index - 1) < result.file_paths.len) {
                 const abs_path = result.file_paths[@intCast(index - 1)];
                 frame.source_url = .init(abs_path);
-                const relative_path_buf = ctx.dev.relative_path_buf.lock();
+                const relative_path_buf = bun.path_buffer_pool.get();
+                defer bun.path_buffer_pool.put(relative_path_buf);
                 const rel_path = ctx.dev.relativePath(relative_path_buf, abs_path);
                 if (bun.strings.eql(frame.function_name.value.ZigString.slice(), rel_path)) {
                     frame.function_name = .empty;
                 }
-                ctx.dev.relative_path_buf.unlock();
                 frame.remapped = true;
 
                 if (runtime_lines == null) {
                     const file = result.entry_files.get(@intCast(index - 1));
-                    if (file != .empty) {
-                        const json_encoded_source_code = file.ref.data.quotedContents();
+                    if (file.get()) |source_map| {
+                        const json_encoded_source_code = source_map.quotedContents();
                         // First line of interest is two above the target line.
                         const target_line = @as(usize, @intCast(frame.position.line.zeroBased()));
                         first_line_of_interest = target_line -| 2;
@@ -238,7 +239,7 @@ pub fn runWithBody(ctx: *ErrorReportRequest, body: []const u8, r: AnyResponse) !
         ) catch {},
     }
 
-    var out: std.ArrayList(u8) = .init(ctx.dev.allocator);
+    var out: std.array_list.Managed(u8) = .init(ctx.dev.allocator());
     errdefer out.deinit();
     const w = out.writer();
 
@@ -253,7 +254,8 @@ pub fn runWithBody(ctx: *ErrorReportRequest, body: []const u8, r: AnyResponse) !
 
         const src_to_write = frame.source_url.value.ZigString.slice();
         if (bun.strings.hasPrefixComptime(src_to_write, "/")) {
-            const relative_path_buf = ctx.dev.relative_path_buf.lock();
+            const relative_path_buf = bun.path_buffer_pool.get();
+            defer bun.path_buffer_pool.put(relative_path_buf);
             const file = ctx.dev.relativePath(relative_path_buf, src_to_write);
             try w.writeInt(u32, @intCast(file.len), .little);
             try w.writeAll(file);
@@ -366,8 +368,8 @@ fn extractJsonEncodedSourceCode(contents: []const u8, target_line: u32, comptime
 
         // Decode it
         if (has_extra_escapes) {
-            var bytes: std.ArrayList(u8) = try .initCapacity(arena, encoded_line.len);
-            try l.decodeEscapeSequences(0, encoded_line, false, std.ArrayList(u8), &bytes);
+            var bytes: std.array_list.Managed(u8) = try .initCapacity(arena, encoded_line.len);
+            try l.decodeEscapeSequences(0, encoded_line, false, std.array_list.Managed(u8), &bytes);
             decoded_line.* = bytes.items;
         } else {
             decoded_line.* = encoded_line;

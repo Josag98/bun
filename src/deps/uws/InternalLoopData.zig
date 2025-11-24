@@ -11,8 +11,8 @@ pub const InternalLoopData = extern struct {
     recv_buf: [*]u8,
     send_buf: [*]u8,
     ssl_data: ?*anyopaque,
-    pre_cb: ?*fn (?*Loop) callconv(.C) void,
-    post_cb: ?*fn (?*Loop) callconv(.C) void,
+    pre_cb: ?*fn (?*Loop) callconv(.c) void,
+    post_cb: ?*fn (?*Loop) callconv(.c) void,
     closed_udp_head: ?*udp.Socket,
     closed_head: ?*us_socket_t,
     low_prio_head: ?*us_socket_t,
@@ -27,6 +27,10 @@ pub const InternalLoopData = extern struct {
 
     pub fn recvSlice(this: *InternalLoopData) []u8 {
         return this.recv_buf[0..LIBUS_RECV_BUFFER_LENGTH];
+    }
+
+    pub fn shouldEnableDateHeaderTimer(this: *const InternalLoopData) bool {
+        return this.sweep_timer_count > 0;
     }
 
     pub fn setParentEventLoop(this: *InternalLoopData, parent: jsc.EventLoopHandle) void {
